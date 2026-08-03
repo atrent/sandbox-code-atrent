@@ -26,6 +26,7 @@ sandbox-code (shell wrapper) → sandbox-code.py (Python) → docker run sandbox
 - Multiple apt repos merged into a single RUN step to keep layers low.
 - No Docker CLI, no socket mount — the container has no host Docker access.
 - Persistent dirs (`~/.config/opencode`, `~/.local/share/opencode`) are pre-created and chowned to `sandbox` so bind mounts inherit correct ownership.
+- **Headless Chromium** (`chromium-browser`) is installed. Use `chromium-browser --headless` or `chromium-browser --headless=new` for headless mode. For Playwright/Puppeteer, set `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser`.
 
 ## Volumes & mounts
 

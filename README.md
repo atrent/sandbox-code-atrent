@@ -93,6 +93,7 @@ sandbox-code --reset
 | JDK (Temurin) | 26 |
 | Maven | 3.9 |
 | GitHub CLI | ✓ |
+| Chromium (headless) | ✓ |
 | git, curl, wget, vim, jq | ✓ |
 | OpenCode | latest |
 

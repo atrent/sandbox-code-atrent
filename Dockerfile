@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates gnupg lsb-release \
     python3 python3-pip python3-venv \
     maven \
+    chromium-browser \
     && rm -rf /var/lib/apt/lists/*
 
 RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium-archive-keyring.gpg \
