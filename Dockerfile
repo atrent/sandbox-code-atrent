@@ -24,6 +24,8 @@ RUN wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public | gp
 
 RUN npm install -g opencode-ai
 
+COPY opencode.jsonc tui.json /home/ubuntu/.config/opencode/
+
 RUN mkdir -p /home/ubuntu/.config/opencode /home/ubuntu/.local/share/opencode && \
     chown -R ubuntu:ubuntu /home/ubuntu/.config /home/ubuntu/.local && \
     echo "PS1='\[\033[01;35m\]\u@\h\[\033[00m\]:\[\033[01;33m\]\w\[\033[00m\]\\\$ '" >> /home/ubuntu/.bashrc

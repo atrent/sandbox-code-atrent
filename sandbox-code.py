@@ -94,6 +94,14 @@ def main():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    _project_root = pathlib.Path(script_dir)
+    for name in ("opencode.jsonc", "tui.json"):
+        dst = CONFIG_DIR / name
+        if not dst.exists():
+            src = _project_root / name
+            if src.exists():
+                shutil.copy2(src, dst)
+
     build_cmd = ["docker", "build", "-t", "sandbox-code:latest"]
     if args.no_cache:
         build_cmd.append("--no-cache")
