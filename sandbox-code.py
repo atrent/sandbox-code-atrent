@@ -65,6 +65,11 @@ def main():
         help="Mount ~/.ssh (read-only) and ~/.config/gh (writable)",
     )
     parser.add_argument(
+        "--x11",
+        action="store_true",
+        help="Mount X11 socket for clipboard support (enables copy/paste)",
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command to run inside the container (default: opencode .)",
@@ -125,6 +130,36 @@ def main():
         "-e", f'TERM={os.environ.get("TERM", "xterm-256color")}',
         "-w", "/workspace",
     ]
+
+    # X11 support for clipboard
+    if args.x11:
+        # Pass DISPLAY environment variable
+        if "DISPLAY" in os.environ:
+            docker_cmd.extend(["-e", f'DISPLAY={os.environ["DISPLAY"]}'])
+            docker_cmd.extend(["-v", "/tmp/.X11-unix:/tmp/.X11-unix"])
+            print("[INFO] X11 support enabled (DISPLAY={})".format(os.environ["DISPLAY"]))
+        else:
+            print("[WARNING] --x11 requested but DISPLAY not set in environment", file=sys.stderr)
+        
+        # Also try to detect and pass XAUTHORITY if available
+        if "XAUTHORITY" in os.environ:
+            docker_cmd.extend(["-e", f'XAUTHORITY={os.environ["XAUTHORITY"]}'])
+            docker_cmd.extend(["-v", f'{os.environ["XAUTHORITY"]}:{os.environ["XAUTHORITY"]}'])
+        
+        # Additional common Xauthority location
+        xauth_path = pathlib.Path.home() / ".Xauthority"
+        if xauth_path.exists():
+            docker_cmd.extend(["-v", f"{xauth_path}:/home/ubuntu/.Xauthority:ro"])
+            docker_cmd.extend(["-e", "XAUTHORITY=/home/ubuntu/.Xauthority"])
+
+        # Wayland support (if using Wayland with XWayland)
+        if "WAYLAND_DISPLAY" in os.environ:
+            runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000")
+            wayland_display = os.environ["WAYLAND_DISPLAY"]
+            docker_cmd.extend(["-e", f'WAYLAND_DISPLAY={wayland_display}'])
+            docker_cmd.extend(["-v", f"{runtime_dir}/{wayland_display}:/tmp/{wayland_display}"])
+            docker_cmd.extend(["-e", "XDG_RUNTIME_DIR=/tmp"])
+            print("[INFO] Wayland socket mounted for XWayland support")
 
     mounts = set()
 
