@@ -298,20 +298,21 @@ def _iptables_available():
 
 def _add_rules_iptables(bridge_iface, cidrs):
     ok = True
-    for cidr in cidrs:
-        check = subprocess.run(
-            ["sudo", "iptables", "-C", "DOCKER-USER",
-             "-i", bridge_iface, "-d", cidr, "-j", "DROP"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if check.returncode != 0:
-            rc = subprocess.run(
-                ["sudo", "iptables", "-I", "DOCKER-USER", "1",
-                 "-i", bridge_iface, "-d", cidr, "-j", "DROP",
-                 "-m", "comment", "--comment", "sandbox-code-caged"],
-            ).returncode
-            if rc != 0:
-                ok = False
+    for chain in ("DOCKER-USER", "INPUT"):
+        for cidr in cidrs:
+            check = subprocess.run(
+                ["sudo", "iptables", "-C", chain,
+                 "-i", bridge_iface, "-d", cidr, "-j", "DROP"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if check.returncode != 0:
+                rc = subprocess.run(
+                    ["sudo", "iptables", "-I", chain, "1",
+                     "-i", bridge_iface, "-d", cidr, "-j", "DROP",
+                     "-m", "comment", "--comment", "sandbox-code-caged"],
+                ).returncode
+                if rc != 0:
+                    ok = False
     return ok
 
 
@@ -319,18 +320,20 @@ def _add_rules_nft(bridge_iface, cidrs):
     table = "inet sandbox-code-caged"
     subprocess.run(["sudo", "nft", "add", "table", table],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["sudo", "nft", "add", "chain", table, "forward",
-                    "{ type filter hook forward priority 0; }"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     ok = True
-    for cidr in cidrs:
-        rc = subprocess.run(
-            ["sudo", "nft", "add", "rule", table, "forward",
-             f"iifname {bridge_iface} ip daddr {cidr} drop"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ).returncode
-        if rc != 0:
-            ok = False
+    for hook in ("forward", "input"):
+        chain_hook = f"{hook}_caged"
+        subprocess.run(["sudo", "nft", "add", "chain", table, chain_hook,
+                        f"{{ type filter hook {hook} priority 0; }}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for cidr in cidrs:
+            rc = subprocess.run(
+                ["sudo", "nft", "add", "rule", table, chain_hook,
+                 f"iifname {bridge_iface} ip daddr {cidr} drop"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+            if rc != 0:
+                ok = False
     return ok
 
 
@@ -358,9 +361,11 @@ def _add_caged_rules(network, cidrs):
     if _iptables_available():
         for cidr in cidrs:
             print(f"          sudo iptables -I DOCKER-USER 1 -i {iface} -d {cidr} -j DROP", file=sys.stderr)
+            print(f"          sudo iptables -I INPUT 1 -i {iface} -d {cidr} -j DROP", file=sys.stderr)
     elif _nft_available():
         for cidr in cidrs:
-            print(f"          sudo nft add rule inet sandbox-code-caged forward iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
+            print(f"          sudo nft add rule inet sandbox-code-caged forward_caged iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
+            print(f"          sudo nft add rule inet sandbox-code-caged input_caged iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
     else:
         for cidr in cidrs:
             print(f"          (no firewall tool found, block manually: interface={iface} dst={cidr})", file=sys.stderr)
@@ -372,13 +377,14 @@ def _clean_rules_iptables(network, cidrs):
     except subprocess.CalledProcessError:
         print(f"[INFO] Network '{network}' not found, nothing to clean")
         return
-    for cidr in cidrs:
-        subprocess.run(
-            ["sudo", "iptables", "-D", "DOCKER-USER",
-             "-i", iface, "-d", cidr, "-j", "DROP",
-             "-m", "comment", "--comment", "sandbox-code-caged"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+    for chain in ("DOCKER-USER", "INPUT"):
+        for cidr in cidrs:
+            subprocess.run(
+                ["sudo", "iptables", "-D", chain,
+                 "-i", iface, "-d", cidr, "-j", "DROP",
+                 "-m", "comment", "--comment", "sandbox-code-caged"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
 
 def _clean_rules_nft():
