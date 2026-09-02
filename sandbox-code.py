@@ -70,12 +70,44 @@ def main():
         help="Mount X11 socket for clipboard support (enables copy/paste)",
     )
     parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Disable all networking (--network none)",
+    )
+    parser.add_argument(
+        "--network",
+        type=str,
+        default=None,
+        help="Docker network to use (default: bridge)",
+    )
+    parser.add_argument(
+        "--caged",
+        action="store_true",
+        help="Isolate from local network & Tailscale, keep internet access",
+    )
+    parser.add_argument(
+        "--clean-rules",
+        action="store_true",
+        help="Remove firewall rules created by --caged",
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command to run inside the container (default: opencode .)",
     )
 
     args = parser.parse_args()
+
+    if args.clean_rules:
+        _clean_caged_rules()
+        return
+
+    if args.caged and args.no_network:
+        parser.error("--caged and --no-network are mutually exclusive")
+    if args.caged and args.network:
+        parser.error("--caged and --network are mutually exclusive")
+    if args.no_network and args.network:
+        parser.error("--no-network and --network are mutually exclusive")
 
     if args.version:
         subprocess.run(
@@ -163,6 +195,38 @@ def main():
             docker_cmd.extend(["-e", "XDG_RUNTIME_DIR=/tmp"])
             print("[INFO] Wayland socket mounted for XWayland support")
 
+    # --- Network isolation ---
+    CAGED_NETWORK = "sandbox-code-caged"
+    RFC1918_TAILSCALE = [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "169.254.0.0/16",
+    ]
+
+    if args.no_network:
+        docker_cmd.extend(["--network", "none"])
+    elif args.caged:
+        result = subprocess.run(
+            ["docker", "network", "inspect", CAGED_NETWORK],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["docker", "network", "create", "-d", "bridge",
+                 "--subnet", "172.30.0.0/16", CAGED_NETWORK],
+                check=True,
+            )
+            print(f"[INFO] Created Docker network '{CAGED_NETWORK}'")
+
+        _add_caged_rules(CAGED_NETWORK, RFC1918_TAILSCALE)
+
+        docker_cmd.extend(["--network", CAGED_NETWORK])
+        docker_cmd.extend(["--dns", "1.1.1.1", "--dns", "8.8.8.8"])
+    elif args.network:
+        docker_cmd.extend(["--network", args.network])
+
     mounts = set()
 
     def add_mount(src, dst, readonly=True):
@@ -205,6 +269,147 @@ def main():
         sys.exit(e.returncode)
     except KeyboardInterrupt:
         sys.exit(0)
+
+
+def _bridge_iface(network):
+    result = subprocess.run(
+        ["docker", "network", "inspect", network,
+         "--format", "{{index .Options \"com.docker.network.bridge.name\"}}"],
+        capture_output=True, text=True, check=True,
+    )
+    iface = result.stdout.strip()
+    if iface:
+        return iface
+    result = subprocess.run(
+        ["docker", "network", "inspect", network,
+         "--format", "{{.Id}}"],
+        capture_output=True, text=True, check=True,
+    )
+    return f"br-{result.stdout.strip()[:12]}"
+
+
+def _nft_available():
+    return shutil.which("nft") is not None
+
+
+def _iptables_available():
+    return shutil.which("iptables") is not None
+
+
+def _add_rules_iptables(bridge_iface, cidrs):
+    ok = True
+    for cidr in cidrs:
+        check = subprocess.run(
+            ["sudo", "iptables", "-C", "DOCKER-USER",
+             "-i", bridge_iface, "-d", cidr, "-j", "DROP"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if check.returncode != 0:
+            rc = subprocess.run(
+                ["sudo", "iptables", "-I", "DOCKER-USER", "1",
+                 "-i", bridge_iface, "-d", cidr, "-j", "DROP",
+                 "-m", "comment", "--comment", "sandbox-code-caged"],
+            ).returncode
+            if rc != 0:
+                ok = False
+    return ok
+
+
+def _add_rules_nft(bridge_iface, cidrs):
+    table = "inet sandbox-code-caged"
+    subprocess.run(["sudo", "nft", "add", "table", table],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "nft", "add", "chain", table, "forward",
+                    "{ type filter hook forward priority 0; }"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ok = True
+    for cidr in cidrs:
+        rc = subprocess.run(
+            ["sudo", "nft", "add", "rule", table, "forward",
+             f"iifname {bridge_iface} ip daddr {cidr} drop"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode
+        if rc != 0:
+            ok = False
+    return ok
+
+
+def _add_caged_rules(network, cidrs):
+    try:
+        iface = _bridge_iface(network)
+    except subprocess.CalledProcessError:
+        print(f"[ERROR] Cannot inspect network '{network}'", file=sys.stderr)
+        return
+
+    if _iptables_available():
+        if _add_rules_iptables(iface, cidrs):
+            return
+        if _nft_available():
+            print("[INFO] iptables failed, falling back to nftables")
+            if _add_rules_nft(iface, cidrs):
+                return
+
+    if _nft_available():
+        if _add_rules_nft(iface, cidrs):
+            return
+
+    print("[WARNING] Could not apply firewall rules (sudo failed).", file=sys.stderr)
+    print("          Add these rules manually to isolate the network:", file=sys.stderr)
+    if _iptables_available():
+        for cidr in cidrs:
+            print(f"          sudo iptables -I DOCKER-USER 1 -i {iface} -d {cidr} -j DROP", file=sys.stderr)
+    elif _nft_available():
+        for cidr in cidrs:
+            print(f"          sudo nft add rule inet sandbox-code-caged forward iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
+    else:
+        for cidr in cidrs:
+            print(f"          (no firewall tool found, block manually: interface={iface} dst={cidr})", file=sys.stderr)
+
+
+def _clean_rules_iptables(network, cidrs):
+    try:
+        iface = _bridge_iface(network)
+    except subprocess.CalledProcessError:
+        print(f"[INFO] Network '{network}' not found, nothing to clean")
+        return
+    for cidr in cidrs:
+        subprocess.run(
+            ["sudo", "iptables", "-D", "DOCKER-USER",
+             "-i", iface, "-d", cidr, "-j", "DROP",
+             "-m", "comment", "--comment", "sandbox-code-caged"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
+def _clean_rules_nft():
+    subprocess.run(["sudo", "nft", "delete", "table", "inet", "sandbox-code-caged"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _clean_caged_rules():
+    CAGED_NETWORK = "sandbox-code-caged"
+    RFC1918_TAILSCALE = [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "169.254.0.0/16",
+    ]
+
+    cleaned = False
+
+    if _iptables_available():
+        _clean_rules_iptables(CAGED_NETWORK, RFC1918_TAILSCALE)
+        cleaned = True
+
+    if _nft_available():
+        _clean_rules_nft()
+        cleaned = True
+
+    if cleaned:
+        print("[INFO] Firewall rules removed")
+    else:
+        print("[WARNING] No firewall tool (iptables/nft) available, nothing cleaned", file=sys.stderr)
 
 
 if __name__ == "__main__":
