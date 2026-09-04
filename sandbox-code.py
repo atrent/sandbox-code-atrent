@@ -25,6 +25,7 @@ API_KEY_VARS = [
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    CAGED_CONF = os.path.join(script_dir, "caged-networks.conf")
 
     parser = argparse.ArgumentParser(
         description="Start sandbox-code Docker container with OpenCode"
@@ -96,10 +97,12 @@ def main():
         help="Command to run inside the container (default: opencode .)",
     )
 
+    CAGED_CONF = os.path.join(script_dir, "caged-networks.conf")
+
     args = parser.parse_args()
 
     if args.clean_rules:
-        _clean_caged_rules()
+        _clean_caged_rules(CAGED_CONF)
         return
 
     if args.caged and args.no_network:
@@ -196,33 +199,26 @@ def main():
             print("[INFO] Wayland socket mounted for XWayland support")
 
     # --- Network isolation ---
-    CAGED_NETWORK = "sandbox-code-caged"
-    RFC1918_TAILSCALE = [
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "100.64.0.0/10",
-        "169.254.0.0/16",
-    ]
+    caged_network, caged_subnet, caged_cidrs = _load_caged_config(CAGED_CONF)
 
     if args.no_network:
         docker_cmd.extend(["--network", "none"])
     elif args.caged:
         result = subprocess.run(
-            ["docker", "network", "inspect", CAGED_NETWORK],
+            ["docker", "network", "inspect", caged_network],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             subprocess.run(
                 ["docker", "network", "create", "-d", "bridge",
-                 "--subnet", "172.30.0.0/16", CAGED_NETWORK],
+                 "--subnet", caged_subnet, caged_network],
                 check=True,
             )
-            print(f"[INFO] Created Docker network '{CAGED_NETWORK}'")
+            print(f"[INFO] Created Docker network '{caged_network}'")
 
-        _add_caged_rules(CAGED_NETWORK, RFC1918_TAILSCALE)
+        _add_caged_rules(caged_network, caged_cidrs)
 
-        docker_cmd.extend(["--network", CAGED_NETWORK])
+        docker_cmd.extend(["--network", caged_network])
         docker_cmd.extend(["--dns", "1.1.1.1", "--dns", "8.8.8.8"])
     elif args.network:
         docker_cmd.extend(["--network", args.network])
@@ -392,20 +388,30 @@ def _clean_rules_nft():
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def _clean_caged_rules():
-    CAGED_NETWORK = "sandbox-code-caged"
-    RFC1918_TAILSCALE = [
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "100.64.0.0/10",
-        "169.254.0.0/16",
-    ]
+def _load_caged_config(path):
+    if not os.path.isfile(path):
+        print(f"[ERROR] Config file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    lines = []
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            lines.append(line)
+    if len(lines) < 3:
+        print(f"[ERROR] Config file too short ({len(lines)} lines, need at least 3)", file=sys.stderr)
+        sys.exit(1)
+    return lines[0], lines[1], lines[2:]
+
+
+def _clean_caged_rules(config_path):
+    caged_network, _, caged_cidrs = _load_caged_config(config_path)
 
     cleaned = False
 
     if _iptables_available():
-        _clean_rules_iptables(CAGED_NETWORK, RFC1918_TAILSCALE)
+        _clean_rules_iptables(caged_network, caged_cidrs)
         cleaned = True
 
     if _nft_available():
