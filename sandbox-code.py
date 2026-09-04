@@ -92,6 +92,11 @@ def main():
         help="Remove firewall rules created by --caged",
     )
     parser.add_argument(
+        "--no-git",
+        action="store_true",
+        help="Hide .git directory (tmpfs over /workspace/.git)",
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command to run inside the container (default: opencode .)",
@@ -255,6 +260,9 @@ def main():
         pass
     else:
         docker_cmd.extend(["-c", "opencode ."])
+
+    if args.no_git:
+        docker_cmd.extend(["--tmpfs", "/workspace/.git:ro,noexec,nosuid"])
 
     subprocess.run(["docker", "rm", "-f", "sandbox-code"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
