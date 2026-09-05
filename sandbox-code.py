@@ -25,7 +25,6 @@ API_KEY_VARS = [
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    CAGED_CONF = os.path.join(script_dir, "caged-networks.conf")
 
     parser = argparse.ArgumentParser(
         description="Start sandbox-code Docker container with OpenCode"
@@ -82,14 +81,19 @@ def main():
         help="Docker network to use (default: bridge)",
     )
     parser.add_argument(
-        "--caged",
+        "--blacklist",
         action="store_true",
-        help="Isolate from local network & Tailscale, keep internet access",
+        help="Isolate from local/Tailscale subnets, allow internet",
+    )
+    parser.add_argument(
+        "--whitelist",
+        action="store_true",
+        help="Allow only listed CIDRs, block everything else (inverted blacklist)",
     )
     parser.add_argument(
         "--clean-rules",
         action="store_true",
-        help="Remove firewall rules created by --caged",
+        help="Remove firewall rules created by --blacklist / --whitelist",
     )
     parser.add_argument(
         "--no-git",
@@ -102,20 +106,24 @@ def main():
         help="Command to run inside the container (default: opencode .)",
     )
 
-    CAGED_CONF = os.path.join(script_dir, "caged-networks.conf")
-
     args = parser.parse_args()
 
-    if args.clean_rules:
-        _clean_caged_rules(CAGED_CONF)
-        return
+    network_opts = [args.blacklist, args.whitelist, args.no_network, bool(args.network)]
+    if sum(network_opts) > 1:
+        pieces = []
+        if args.blacklist:
+            pieces.append("--blacklist")
+        if args.whitelist:
+            pieces.append("--whitelist")
+        if args.no_network:
+            pieces.append("--no-network")
+        if args.network:
+            pieces.append("--network")
+        parser.error(f"{', '.join(pieces)} are mutually exclusive")
 
-    if args.caged and args.no_network:
-        parser.error("--caged and --no-network are mutually exclusive")
-    if args.caged and args.network:
-        parser.error("--caged and --network are mutually exclusive")
-    if args.no_network and args.network:
-        parser.error("--no-network and --network are mutually exclusive")
+    if args.clean_rules:
+        _clean_all_rules(script_dir)
+        return
 
     if args.version:
         subprocess.run(
@@ -175,26 +183,22 @@ def main():
 
     # X11 support for clipboard
     if args.x11:
-        # Pass DISPLAY environment variable
         if "DISPLAY" in os.environ:
             docker_cmd.extend(["-e", f'DISPLAY={os.environ["DISPLAY"]}'])
             docker_cmd.extend(["-v", "/tmp/.X11-unix:/tmp/.X11-unix"])
             print("[INFO] X11 support enabled (DISPLAY={})".format(os.environ["DISPLAY"]))
         else:
             print("[WARNING] --x11 requested but DISPLAY not set in environment", file=sys.stderr)
-        
-        # Also try to detect and pass XAUTHORITY if available
+
         if "XAUTHORITY" in os.environ:
             docker_cmd.extend(["-e", f'XAUTHORITY={os.environ["XAUTHORITY"]}'])
             docker_cmd.extend(["-v", f'{os.environ["XAUTHORITY"]}:{os.environ["XAUTHORITY"]}'])
-        
-        # Additional common Xauthority location
+
         xauth_path = pathlib.Path.home() / ".Xauthority"
         if xauth_path.exists():
             docker_cmd.extend(["-v", f"{xauth_path}:/home/ubuntu/.Xauthority:ro"])
             docker_cmd.extend(["-e", "XAUTHORITY=/home/ubuntu/.Xauthority"])
 
-        # Wayland support (if using Wayland with XWayland)
         if "WAYLAND_DISPLAY" in os.environ:
             runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000")
             wayland_display = os.environ["WAYLAND_DISPLAY"]
@@ -204,27 +208,29 @@ def main():
             print("[INFO] Wayland socket mounted for XWayland support")
 
     # --- Network isolation ---
-    caged_network, caged_subnet, caged_cidrs = _load_caged_config(CAGED_CONF)
+    if args.blacklist or args.whitelist:
+        mode = "blacklist" if args.blacklist else "whitelist"
+        conf_path = os.path.join(script_dir, f"{mode}-networks.conf")
+        network_name, subnet, cidrs = _load_filter_config(conf_path)
 
-    if args.no_network:
-        docker_cmd.extend(["--network", "none"])
-    elif args.caged:
         result = subprocess.run(
-            ["docker", "network", "inspect", caged_network],
+            ["docker", "network", "inspect", network_name],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             subprocess.run(
                 ["docker", "network", "create", "-d", "bridge",
-                 "--subnet", caged_subnet, caged_network],
+                 "--subnet", subnet, network_name],
                 check=True,
             )
-            print(f"[INFO] Created Docker network '{caged_network}'")
+            print(f"[INFO] Created Docker network '{network_name}'")
 
-        _add_caged_rules(caged_network, caged_cidrs)
+        _apply_filter_rules(mode, network_name, cidrs)
 
-        docker_cmd.extend(["--network", caged_network])
+        docker_cmd.extend(["--network", network_name])
         docker_cmd.extend(["--dns", "1.1.1.1", "--dns", "8.8.8.8"])
+    elif args.no_network:
+        docker_cmd.extend(["--network", "none"])
     elif args.network:
         docker_cmd.extend(["--network", args.network])
 
@@ -275,6 +281,10 @@ def main():
         sys.exit(0)
 
 
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
 def _bridge_iface(network):
     result = subprocess.run(
         ["docker", "network", "inspect", network,
@@ -300,103 +310,7 @@ def _iptables_available():
     return shutil.which("iptables") is not None
 
 
-def _add_rules_iptables(bridge_iface, cidrs):
-    ok = True
-    for chain in ("DOCKER-USER", "INPUT"):
-        for cidr in cidrs:
-            check = subprocess.run(
-                ["sudo", "iptables", "-C", chain,
-                 "-i", bridge_iface, "-d", cidr, "-j", "DROP"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            if check.returncode != 0:
-                rc = subprocess.run(
-                    ["sudo", "iptables", "-I", chain, "1",
-                     "-i", bridge_iface, "-d", cidr, "-j", "DROP",
-                     "-m", "comment", "--comment", "sandbox-code-caged"],
-                ).returncode
-                if rc != 0:
-                    ok = False
-    return ok
-
-
-def _add_rules_nft(bridge_iface, cidrs):
-    table = "inet sandbox-code-caged"
-    subprocess.run(["sudo", "nft", "add", "table", table],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    ok = True
-    for hook in ("forward", "input"):
-        chain_hook = f"{hook}_caged"
-        subprocess.run(["sudo", "nft", "add", "chain", table, chain_hook,
-                        f"{{ type filter hook {hook} priority 0; }}"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for cidr in cidrs:
-            rc = subprocess.run(
-                ["sudo", "nft", "add", "rule", table, chain_hook,
-                 f"iifname {bridge_iface} ip daddr {cidr} drop"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ).returncode
-            if rc != 0:
-                ok = False
-    return ok
-
-
-def _add_caged_rules(network, cidrs):
-    try:
-        iface = _bridge_iface(network)
-    except subprocess.CalledProcessError:
-        print(f"[ERROR] Cannot inspect network '{network}'", file=sys.stderr)
-        return
-
-    if _iptables_available():
-        if _add_rules_iptables(iface, cidrs):
-            return
-        if _nft_available():
-            print("[INFO] iptables failed, falling back to nftables")
-            if _add_rules_nft(iface, cidrs):
-                return
-
-    if _nft_available():
-        if _add_rules_nft(iface, cidrs):
-            return
-
-    print("[WARNING] Could not apply firewall rules (sudo failed).", file=sys.stderr)
-    print("          Add these rules manually to isolate the network:", file=sys.stderr)
-    if _iptables_available():
-        for cidr in cidrs:
-            print(f"          sudo iptables -I DOCKER-USER 1 -i {iface} -d {cidr} -j DROP", file=sys.stderr)
-            print(f"          sudo iptables -I INPUT 1 -i {iface} -d {cidr} -j DROP", file=sys.stderr)
-    elif _nft_available():
-        for cidr in cidrs:
-            print(f"          sudo nft add rule inet sandbox-code-caged forward_caged iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
-            print(f"          sudo nft add rule inet sandbox-code-caged input_caged iifname {iface} ip daddr {cidr} drop", file=sys.stderr)
-    else:
-        for cidr in cidrs:
-            print(f"          (no firewall tool found, block manually: interface={iface} dst={cidr})", file=sys.stderr)
-
-
-def _clean_rules_iptables(network, cidrs):
-    try:
-        iface = _bridge_iface(network)
-    except subprocess.CalledProcessError:
-        print(f"[INFO] Network '{network}' not found, nothing to clean")
-        return
-    for chain in ("DOCKER-USER", "INPUT"):
-        for cidr in cidrs:
-            subprocess.run(
-                ["sudo", "iptables", "-D", chain,
-                 "-i", iface, "-d", cidr, "-j", "DROP",
-                 "-m", "comment", "--comment", "sandbox-code-caged"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-
-
-def _clean_rules_nft():
-    subprocess.run(["sudo", "nft", "delete", "table", "inet", "sandbox-code-caged"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _load_caged_config(path):
+def _load_filter_config(path):
     if not os.path.isfile(path):
         print(f"[ERROR] Config file not found: {path}", file=sys.stderr)
         sys.exit(1)
@@ -413,17 +327,173 @@ def _load_caged_config(path):
     return lines[0], lines[1], lines[2:]
 
 
-def _clean_caged_rules(config_path):
-    caged_network, _, caged_cidrs = _load_caged_config(config_path)
+# -- rule helpers ------------------------------------------------------------
 
-    cleaned = False
+_TAG = "sandbox-code"
+_IPTABLES_CHAINS = ("DOCKER-USER", "INPUT")
+_NFT_TABLE = f"inet {_TAG}"
+
+
+def _rule_exists_iptables(chain, iface, cidr, action):
+    rc = subprocess.run(
+        ["sudo", "iptables", "-C", chain,
+         "-i", iface, "-d", cidr, "-j", action,
+         "-m", "comment", "--comment", _TAG],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode
+    return rc == 0
+
+
+def _rule_add_iptables(chain, iface, cidr, action):
+    return subprocess.run(
+        ["sudo", "iptables", "-I", chain, "1",
+         "-i", iface, "-d", cidr, "-j", action,
+         "-m", "comment", "--comment", _TAG],
+    ).returncode
+
+
+def _rule_del_iptables(chain, iface, cidr, action):
+    return subprocess.run(
+        ["sudo", "iptables", "-D", chain,
+         "-i", iface, "-d", cidr, "-j", action,
+         "-m", "comment", "--comment", _TAG],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode
+
+
+# -- blacklist ---------------------------------------------------------------
+
+def _add_blacklist_iptables(iface, cidrs):
+    ok = True
+    for chain in _IPTABLES_CHAINS:
+        for cidr in cidrs:
+            if not _rule_exists_iptables(chain, iface, cidr, "DROP"):
+                if _rule_add_iptables(chain, iface, cidr, "DROP") != 0:
+                    ok = False
+    return ok
+
+
+def _add_blacklist_nft(iface, cidrs):
+    subprocess.run(["sudo", "nft", "add", "table", _NFT_TABLE],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ok = True
+    for hook in ("forward", "input"):
+        chain_name = f"{hook}_bl"
+        subprocess.run(["sudo", "nft", "add", "chain", _NFT_TABLE, chain_name,
+                        f"{{ type filter hook {hook} priority 0; }}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for cidr in cidrs:
+            rc = subprocess.run(
+                ["sudo", "nft", "add", "rule", _NFT_TABLE, chain_name,
+                 f"iifname {iface} ip daddr {cidr} drop"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+            if rc != 0:
+                ok = False
+    return ok
+
+
+def _del_blacklist_iptables(iface, cidrs):
+    for chain in _IPTABLES_CHAINS:
+        for cidr in cidrs:
+            _rule_del_iptables(chain, iface, cidr, "DROP")
+
+
+# -- whitelist ---------------------------------------------------------------
+
+def _add_whitelist_iptables(iface, cidrs):
+    ok = True
+    for chain in _IPTABLES_CHAINS:
+        for cidr in cidrs:
+            if not _rule_exists_iptables(chain, iface, cidr, "ACCEPT"):
+                if _rule_add_iptables(chain, iface, cidr, "ACCEPT") != 0:
+                    ok = False
+        if not _rule_exists_iptables(chain, iface, "0.0.0.0/0", "DROP"):
+            if _rule_add_iptables(chain, iface, "0.0.0.0/0", "DROP") != 0:
+                ok = False
+    return ok
+
+
+def _add_whitelist_nft(iface, cidrs):
+    subprocess.run(["sudo", "nft", "add", "table", _NFT_TABLE],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ok = True
+    for hook in ("forward", "input"):
+        chain_name = f"{hook}_wl"
+        subprocess.run(["sudo", "nft", "add", "chain", _NFT_TABLE, chain_name,
+                        f"{{ type filter hook {hook} priority 0; policy drop; }}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for cidr in cidrs:
+            rc = subprocess.run(
+                ["sudo", "nft", "add", "rule", _NFT_TABLE, chain_name,
+                 f"iifname {iface} ip daddr {cidr} accept"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+            if rc != 0:
+                ok = False
+    return ok
+
+
+def _del_whitelist_iptables(iface, cidrs):
+    for chain in _IPTABLES_CHAINS:
+        for cidr in cidrs:
+            _rule_del_iptables(chain, iface, cidr, "ACCEPT")
+        _rule_del_iptables(chain, iface, "0.0.0.0/0", "DROP")
+
+
+# -- orchestrator ------------------------------------------------------------
+
+def _apply_filter_rules(mode, network, cidrs):
+    try:
+        iface = _bridge_iface(network)
+    except subprocess.CalledProcessError:
+        print(f"[ERROR] Cannot inspect network '{network}'", file=sys.stderr)
+        return
+
+    add_ipt, add_nft = (
+        (_add_blacklist_iptables, _add_blacklist_nft) if mode == "blacklist"
+        else (_add_whitelist_iptables, _add_whitelist_nft)
+    )
 
     if _iptables_available():
-        _clean_rules_iptables(caged_network, caged_cidrs)
-        cleaned = True
+        if add_ipt(iface, cidrs):
+            return
+        if _nft_available():
+            print("[INFO] iptables failed, falling back to nftables")
+            if add_nft(iface, cidrs):
+                return
 
     if _nft_available():
-        _clean_rules_nft()
+        if add_nft(iface, cidrs):
+            return
+
+    print(f"[WARNING] Could not apply {mode} firewall rules (sudo failed).", file=sys.stderr)
+
+
+# -- cleanup -----------------------------------------------------------------
+
+def _clean_all_rules(script_dir):
+    cleaned = False
+
+    for mode in ("blacklist", "whitelist"):
+        conf_path = os.path.join(script_dir, f"{mode}-networks.conf")
+        if not os.path.isfile(conf_path):
+            continue
+        network, _, cidrs = _load_filter_config(conf_path)
+        try:
+            iface = _bridge_iface(network)
+        except subprocess.CalledProcessError:
+            print(f"[INFO] Network '{network}' not found, skipping {mode} cleanup")
+            continue
+
+        if _iptables_available():
+            fn_del = _del_blacklist_iptables if mode == "blacklist" else _del_whitelist_iptables
+            fn_del(iface, cidrs)
+            cleaned = True
+
+    if _nft_available():
+        subprocess.run(["sudo", "nft", "delete", "table", _NFT_TABLE],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cleaned = True
 
     if cleaned:
