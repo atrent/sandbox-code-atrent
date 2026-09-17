@@ -258,6 +258,9 @@ def main():
         if var in os.environ:
             docker_cmd.extend(["-e", var])
 
+    if args.no_git:
+        docker_cmd.extend(["--tmpfs", "/workspace/.git:ro,noexec,nosuid"])
+
     docker_cmd.append("sandbox-code:latest")
 
     if command:
@@ -266,9 +269,6 @@ def main():
         pass
     else:
         docker_cmd.extend(["-c", "opencode ."])
-
-    if args.no_git:
-        docker_cmd.extend(["--tmpfs", "/workspace/.git:ro,noexec,nosuid"])
 
     subprocess.run(["docker", "rm", "-f", "sandbox-code"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
