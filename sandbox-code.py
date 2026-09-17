@@ -330,7 +330,7 @@ def _load_filter_config(path):
 # -- rule helpers ------------------------------------------------------------
 
 _TAG = "sandbox-code"
-_IPTABLES_CHAINS = ("DOCKER-USER", "INPUT")
+_IPTABLES_CHAINS = ("FORWARD", "INPUT")
 _NFT_TABLE = f"inet {_TAG}"
 
 
@@ -409,7 +409,12 @@ def _add_whitelist_iptables(iface, cidrs):
                 if _rule_add_iptables(chain, iface, cidr, "ACCEPT") != 0:
                     ok = False
         if not _rule_exists_iptables(chain, iface, "0.0.0.0/0", "DROP"):
-            if _rule_add_iptables(chain, iface, "0.0.0.0/0", "DROP") != 0:
+            rc = subprocess.run(
+                ["sudo", "iptables", "-A", chain,
+                 "-i", iface, "-d", "0.0.0.0/0", "-j", "DROP",
+                 "-m", "comment", "--comment", _TAG],
+            ).returncode
+            if rc != 0:
                 ok = False
     return ok
 
@@ -455,16 +460,19 @@ def _apply_filter_rules(mode, network, cidrs):
         else (_add_whitelist_iptables, _add_whitelist_nft)
     )
 
-    if _iptables_available():
-        if add_ipt(iface, cidrs):
-            return
-        if _nft_available():
-            print("[INFO] iptables failed, falling back to nftables")
-            if add_nft(iface, cidrs):
-                return
-
     if _nft_available():
         if add_nft(iface, cidrs):
+            print(f"[INFO] {mode} applied via nftables: {', '.join(cidrs)}")
+            return
+        if _iptables_available():
+            print("[INFO] nftables failed, falling back to iptables")
+            if add_ipt(iface, cidrs):
+                print(f"[INFO] {mode} applied via iptables: {', '.join(cidrs)}")
+                return
+
+    if _iptables_available():
+        if add_ipt(iface, cidrs):
+            print(f"[INFO] {mode} applied via iptables: {', '.join(cidrs)}")
             return
 
     print(f"[WARNING] Could not apply {mode} firewall rules (sudo failed).", file=sys.stderr)
