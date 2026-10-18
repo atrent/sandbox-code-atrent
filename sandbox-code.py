@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import os
 import pathlib
 import shutil
@@ -9,6 +10,7 @@ import sys
 SANDBOX_HOME = pathlib.Path.home() / ".config" / "sandbox-code"
 CONFIG_DIR = SANDBOX_HOME / "opencode-config"
 DATA_DIR = SANDBOX_HOME / "opencode-data"
+GITMIRROR_DIR = SANDBOX_HOME / "gitmirror"
 SSH_DIR = pathlib.Path.home() / ".ssh"
 GH_DIR = pathlib.Path.home() / ".config" / "gh"
 
@@ -98,7 +100,7 @@ def main():
     parser.add_argument(
         "--no-git",
         action="store_true",
-        help="Hide .git directory (tmpfs over /workspace/.git)",
+        help="Hide the real .git, exposing a disposable per-project repo instead",
     )
     parser.add_argument(
         "command",
@@ -143,6 +145,7 @@ def main():
     if args.reset:
         shutil.rmtree(CONFIG_DIR, ignore_errors=True)
         shutil.rmtree(DATA_DIR, ignore_errors=True)
+        shutil.rmtree(GITMIRROR_DIR, ignore_errors=True)
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,7 +262,11 @@ def main():
             docker_cmd.extend(["-e", var])
 
     if args.no_git:
-        docker_cmd.extend(["--tmpfs", "/workspace/.git:ro,noexec,nosuid"])
+        git_repo = _ensure_project_git(workspace)
+        if git_repo is not None:
+            docker_cmd.extend(["-v", f"{git_repo}:/workspace/.git"])
+        else:
+            docker_cmd.extend(["--tmpfs", "/workspace/.git:ro,noexec,nosuid"])
 
     docker_cmd.append("sandbox-code:latest")
 
@@ -284,6 +291,39 @@ def main():
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _ensure_project_git(workspace):
+    """Return a disposable, per-workspace git repo to mount as .git.
+
+    Hiding the real .git would make OpenCode fail to resolve a project and
+    fall back to the 'global' project, which loses session identity. Exposing
+    a private repo (kept on the host, one per workspace) gives OpenCode a
+    stable project id without revealing the real repository history.
+    """
+    if shutil.which("git") is None:
+        return None
+
+    digest = hashlib.sha256(os.path.abspath(workspace).encode()).hexdigest()[:16]
+    repo_root = GITMIRROR_DIR / digest
+    gitdir = repo_root / ".git"
+    head = gitdir / "HEAD"
+
+    if not head.exists():
+        GITMIRROR_DIR.mkdir(parents=True, exist_ok=True)
+        if repo_root.exists():
+            shutil.rmtree(repo_root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(repo_root)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo_root),
+             "-c", "user.name=sandbox-code",
+             "-c", "user.email=sandbox-code@localhost",
+             "-c", "commit.gpgsign=false",
+             "commit", "--allow-empty", "-q",
+             "-m", "sandbox-code project marker"],
+            check=True,
+        )
+    return gitdir
+
 
 def _bridge_iface(network):
     result = subprocess.run(

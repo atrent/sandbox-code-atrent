@@ -59,8 +59,10 @@ sandbox-code [options] [-- command...]
 | Flag | Description |
 |---|---|
 | `-w`, `--workspace PATH` | Directory to mount as `/workspace` (default: current directory) |
-| `--bash` | Start an interactive bash shell instead of OpenCode |
 | `--version` | Print OpenCode version and exit |
+| `--reset` | Delete all persistent data before starting (config, data, gitmirror) |
+| `--no-cache` | Force a full Docker image rebuild without layer cache |
+| `--bash` | Start an interactive bash shell instead of OpenCode |
 | `--ssh` | Mount `~/.ssh` into the container (read-only) |
 | `--github` | Mount `~/.ssh` (read-only) and `~/.config/gh` (writable) |
 | `--x11` | Mount X11 socket for clipboard support (enables copy/paste) |
@@ -69,9 +71,7 @@ sandbox-code [options] [-- command...]
 | `--blacklist` | Isolate from local/Tailscale subnets, allow internet (`blacklist-networks.conf`) |
 | `--whitelist` | Allow only listed CIDRs, block everything else (`whitelist-networks.conf`) |
 | `--clean-rules` | Remove firewall rules created by `--blacklist` / `--whitelist` |
-| `--no-git` | Hide `.git` directory (tmpfs over `/workspace/.git`) |
-| `--reset` | Delete all persistent data before starting |
-| `--no-cache` | Force a full Docker image rebuild without layer cache |
+| `--no-git` | Hide the real `.git`, exposing a disposable per-project repo (keeps OpenCode sessions recoverable) |
 
 Any arguments after `--` are run as a command inside the container.
 
@@ -81,8 +81,9 @@ OpenCode configuration and stored credentials survive container restarts:
 
 ```
 ~/.config/sandbox-code/
-├── opencode-config/   → /home/sandbox/.config/opencode
-└── opencode-data/     → /home/sandbox/.local/share/opencode
+├── opencode-config/   → /home/ubuntu/.config/opencode
+├── opencode-data/     → /home/ubuntu/.local/share/opencode
+└── gitmirror/         → disposable per-workspace git repos (used by --no-git)
 ```
 
 To wipe everything and start fresh:
@@ -104,12 +105,14 @@ Both require `sudo` to apply iptables/nftables rules on the host.
 Config file format (first two lines = Docker network name + subnet, rest = CIDRs):
 
 ```
-sandbox-code-blacklist
+sandbox-code-caged
 172.30.0.0/16
 # comments start with #
 10.0.0.0/8
+172.16.0.0/12
 192.168.0.0/16
 100.64.0.0/10
+169.254.0.0/16
 ```
 
 Clean up firewall rules:
@@ -127,8 +130,10 @@ sandbox-code --clean-rules
 | Python | 3.14 |
 | JDK (Temurin) | 26 |
 | Maven | 3.9 |
+| Go | ✓ |
 | GitHub CLI | ✓ |
 | Chromium (headless) | ✓ |
+| build-essential, poppler-utils | ✓ |
 | git, curl, wget, vim, jq | ✓ |
 | OpenCode | latest |
 
