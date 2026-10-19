@@ -35,6 +35,7 @@ sandbox-code (shell wrapper) → sandbox-code.py (Python) → docker run sandbox
 - `~/.config/sandbox-code/opencode-data` → `/home/ubuntu/.local/share/opencode`
 - `--ssh`: mounts host `~/.ssh` → container read-only. **Security caveat: exposes SSH private keys to the agent** (read-only still allows reading/exfiltration). Mount only when needed.
 - `--github`: mounts `~/.ssh` (ro) + `~/.config/gh` (rw). **Security caveat: exposes SSH keys and the GitHub token (rw) to the agent.** Not used by the current maintainer; kept from the original author.
+- `--x11`: mounts the X11 socket + `XAUTHORITY` (ro). **Security caveat: gives the container access to the host display (keylogging, screen capture, input injection), not just the clipboard.** Effectively unnecessary for copy/paste: OpenCode emits OSC 52 on every copy, and Shift+selection works in VTE terminals (e.g. lxterminal). Kept for users who rely on `xclip`/`xsel` inside the container.
 - `--no-git`: `_ensure_project_git()` creates a disposable per-workspace git repo under `~/.config/sandbox-code/gitmirror/<sha256(workspace)[:16]/.git` (init + one empty commit) and mounts it over `/workspace/.git`, hiding the real repo while giving OpenCode a stable `project_id`. Falls back to a tmpfs if `git` is unavailable on the host.
 - `add_mount()` deduplicates by destination — same mount target never added twice.
 

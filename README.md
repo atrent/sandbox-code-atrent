@@ -65,7 +65,7 @@ sandbox-code [options] [-- command...]
 | `--bash` | Start an interactive bash shell instead of OpenCode |
 | `--ssh` | Mount `~/.ssh` into the container (read-only). **Security: exposes your SSH private keys to the agent** — see [Credential exposure](#credential-exposure) |
 | `--github` | Mount `~/.ssh` (read-only) and `~/.config/gh` (writable). **Security: exposes your SSH keys and GitHub token (rw) to the agent** — see [Credential exposure](#credential-exposure) |
-| `--x11` | Mount X11 socket for clipboard support (enables copy/paste). Security note: grants the container access to the host display — not just the clipboard |
+| `--x11` | Mount X11 socket for clipboard support. **Security: grants the container access to the host display — not just the clipboard.** Usually unnecessary — see [Clipboard](#clipboard) |
 | `--no-network` | Disable all networking (`--network none`) |
 | `--network NAME` | Use a specific Docker network (default: bridge) |
 | `--blacklist` | Isolate from local/Tailscale subnets, allow internet (`blacklist-networks.conf`) |
@@ -83,6 +83,25 @@ Any arguments after `--` are run as a command inside the container.
 - **`--github`** mounts `~/.ssh` (read-only) **and** `~/.config/gh` **writable**, which holds your GitHub auth token. The agent can read the token and modify the `gh` configuration.
 
 With outbound networking (the default bridge), these credentials can be exfiltrated — e.g. via prompt injection from untrusted files, issues, or web content the agent processes. Use these flags only when strictly needed, prefer scoped deploy keys and minimal-scope tokens, and combine with `--no-network` or `--whitelist` when working on untrusted input.
+
+## Clipboard
+
+`--x11` exists **only** to share the clipboard, but it grants the container access to the host **display**, not just the clipboard (keylogging, screen capture, input injection into other apps). For copy/paste it is usually unnecessary, because OpenCode's clipboard does not need X11:
+
+- **OSC 52 (no X, no mount).** OpenCode's TUI emits an OSC 52 escape on every copy; your terminal emulator receives it and sets the host clipboard.
+- **Terminal-native selection.** The TUI captures the mouse, but holding **Shift** hands the mouse back to the terminal so you can select and copy with the terminal's own shortcut. Confirmed working in **lxterminal**: Shift+drag to select, then `Ctrl+Shift+C` (paste: `Ctrl+Shift+V`, or middle-click for the primary selection).
+- **Pasting into OpenCode** is just the terminal's paste (`Ctrl+Shift+V`); it never needs `--x11`.
+
+OSC 52 terminal support:
+
+| Terminal | OSC 52 |
+|---|---|
+| kitty, alacritty, wezterm, foot, Ghostty, Windows Terminal, iTerm2 (enable in preferences) | yes |
+| VTE-based: lxterminal, GNOME Terminal, XFCE Terminal, Terminator | no — use Shift+selection instead |
+
+Through tmux, OSC 52 additionally needs `set -g set-clipboard on` (and `set -g allow-passthrough on` on tmux ≥ 3.3).
+
+`--x11` is therefore effectively only needed if you specifically rely on `xclip`/`xsel` **inside** the container. Otherwise prefer the alternatives above to keep the host display out of the sandbox.
 
 ## Persistent data
 
