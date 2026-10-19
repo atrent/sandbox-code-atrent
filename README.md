@@ -63,9 +63,9 @@ sandbox-code [options] [-- command...]
 | `--reset` | Delete all persistent data before starting (config, data, gitmirror) |
 | `--no-cache` | Force a full Docker image rebuild without layer cache |
 | `--bash` | Start an interactive bash shell instead of OpenCode |
-| `--ssh` | Mount `~/.ssh` into the container (read-only) |
-| `--github` | Mount `~/.ssh` (read-only) and `~/.config/gh` (writable) |
-| `--x11` | Mount X11 socket for clipboard support (enables copy/paste) |
+| `--ssh` | Mount `~/.ssh` into the container (read-only). **Security: exposes your SSH private keys to the agent** — see [Credential exposure](#credential-exposure) |
+| `--github` | Mount `~/.ssh` (read-only) and `~/.config/gh` (writable). **Security: exposes your SSH keys and GitHub token (rw) to the agent** — see [Credential exposure](#credential-exposure) |
+| `--x11` | Mount X11 socket for clipboard support (enables copy/paste). Security note: grants the container access to the host display — not just the clipboard |
 | `--no-network` | Disable all networking (`--network none`) |
 | `--network NAME` | Use a specific Docker network (default: bridge) |
 | `--blacklist` | Isolate from local/Tailscale subnets, allow internet (`blacklist-networks.conf`) |
@@ -74,6 +74,15 @@ sandbox-code [options] [-- command...]
 | `--no-git` | Hide the real `.git`, exposing a disposable per-project repo (keeps OpenCode sessions recoverable) |
 
 Any arguments after `--` are run as a command inside the container.
+
+## Credential exposure
+
+**`--ssh` and `--github` punch holes in the sandbox by mounting real credentials from your host.** Any process inside the container — including the agent and anything it runs — can read them:
+
+- **`--ssh`** mounts `~/.ssh` read-only. Read-only does **not** prevent use or exfiltration: the agent can read your SSH private keys and authenticate to every host you have access to.
+- **`--github`** mounts `~/.ssh` (read-only) **and** `~/.config/gh` **writable**, which holds your GitHub auth token. The agent can read the token and modify the `gh` configuration.
+
+With outbound networking (the default bridge), these credentials can be exfiltrated — e.g. via prompt injection from untrusted files, issues, or web content the agent processes. Use these flags only when strictly needed, prefer scoped deploy keys and minimal-scope tokens, and combine with `--no-network` or `--whitelist` when working on untrusted input.
 
 ## Persistent data
 

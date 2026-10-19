@@ -59,12 +59,14 @@ def main():
     parser.add_argument(
         "--ssh",
         action="store_true",
-        help="Mount ~/.ssh into the container (read-only)",
+        help="Mount ~/.ssh into the container (read-only). SECURITY: exposes your "
+             "SSH private keys to the agent for the whole session",
     )
     parser.add_argument(
         "--github",
         action="store_true",
-        help="Mount ~/.ssh (read-only) and ~/.config/gh (writable)",
+        help="Mount ~/.ssh (read-only) and ~/.config/gh (writable). SECURITY: "
+             "exposes your SSH keys and GitHub token (rw) to the agent",
     )
     parser.add_argument(
         "--x11",
@@ -195,7 +197,7 @@ def main():
 
         if "XAUTHORITY" in os.environ:
             docker_cmd.extend(["-e", f'XAUTHORITY={os.environ["XAUTHORITY"]}'])
-            docker_cmd.extend(["-v", f'{os.environ["XAUTHORITY"]}:{os.environ["XAUTHORITY"]}'])
+            docker_cmd.extend(["-v", f'{os.environ["XAUTHORITY"]}:{os.environ["XAUTHORITY"]}:ro'])
 
         xauth_path = pathlib.Path.home() / ".Xauthority"
         if xauth_path.exists():
