@@ -1,3 +1,19 @@
+
+---
+---
+
+
+**ARCHIVAL NOTICE**
+
+This fork is kept for archival purposes only.
+
+Active development has moved to the [original repository](https://github.com/besil/sandbox-code).
+
+Please do not use this fork.
+
+---
+---
+
 # sandbox-code
 
 Dockerised development sandbox running [OpenCode](https://opencode.ai) inside an isolated Ubuntu container. The agent has full access inside the container but cannot touch your host system — only the workspace directory you explicitly mount.
